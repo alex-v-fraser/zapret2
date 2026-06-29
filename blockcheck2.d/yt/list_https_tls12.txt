@@ -1,0 +1,19 @@
+# Контрольный прогон финалистов YouTube TLS (одинаковый набор в tls12 и tls13,
+# чтобы найти ОДНУ стратегию, проходящую и 1.2, и 1.3, и видео-GET (16 KB)).
+# Запускать с CURL_HTTPS_GET=1 и REPEATS=5. Без badsum (дружелюбно к offload/NAT).
+# WARNING: спецсимволы типа "<" эскейпить.
+
+# 1) победитель TLS1.3 + video
+--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
+# 2) победитель TLS1.2 + video (классика wssize + multidisorder)
+--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=midsld
+# 3) победитель yt3.ggpht (TLS1.2)
+--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld
+# 4) из COMMON, без badsum: fake + multisplit
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_seq=1000000:repeats=1 --lua-desync=multisplit:pos=midsld
+# 5) из COMMON, без badsum: fake + multisplit (2 точки)
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_seq=1000000:repeats=1 --lua-desync=multisplit:pos=1,midsld
+# 6) попытка покрыть и 1.2, и 1.3 одной цепочкой: wssize + tcpseg
+--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
+# 7) запас на "16 KB": белый SNI www.google.com + multidisorder
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_seq=1000000:tls_mod=rnd,dupsid,sni=www.google.com:repeats=1 --lua-desync=multidisorder:pos=1,midsld

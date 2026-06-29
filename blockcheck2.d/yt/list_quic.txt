@@ -1,0 +1,19 @@
+# QUIC YouTube: фейк готовым "белым" google QUIC initial (SNI www.google.com уже
+# зашит в .bin). Блоб quic_google подгружается из files/fake/ через $ZAPRET_BASE
+# (строки проходят через eval, переменная раскроется на роутере в /config/zapret2).
+# Запускать с ENABLE_HTTP3=1 и REPEATS=5. Если всё UNAVAILABLE — QUIC у провайдера
+# режется целиком, тогда в боевом конфиге его глушим (drop), а видео идёт по TLS.
+# WARNING: спецсимволы типа "<" эскейпить.
+
+# 1) базовый: фейк google-initial, разные repeats
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:repeats=11
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:repeats=6
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:repeats=2
+# 2) фейк google + autottl (фейк дальше DPI, но не до сервера)
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:ip_autottl=-2,3-20:repeats=6
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:ip_ttl=3:repeats=6
+# 3) фейк google + фрагментация настоящего initial (ipfrag реала, оригинал дропаем)
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:repeats=6 --lua-desync=send:ipfrag:ipfrag_pos_udp=8 --lua-desync=drop
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google:repeats=6 --lua-desync=send:ipfrag:ipfrag_pos_udp=32 --lua-desync=drop
+# 4) контроль: стандартный google-fake без доппараметров
+--payload=quic_initial --blob=quic_google:@$ZAPRET_BASE/files/fake/quic_initial_www_google_com.bin --lua-desync=fake:blob=quic_google
