@@ -9,8 +9,9 @@ iOS-приложение**. Переживает перезагрузку роу
 ## TL;DR — что в итоге работает
 
 - **TLS-стратегия (одна на всё):** `tcpseg:pos=0,1:ip_id=rnd:repeats=1` (TLS 1.2 и 1.3).
-- **QUIC (UDP/443):** обходу не поддаётся → **отбиваем ICMP-ом** (`REJECT icmp-port-unreachable`),
-  клиенты сразу уходят на рабочий TLS.
+- **QUIC (UDP/443):** обходу не поддаётся, но **его глушит сам DPI** → клиенты сами
+  откатываются на рабочий TLS. Никаких правил на нашей стороне для QUIC не требуется
+  (глобальный REJECT НЕ ставим — он ломает сторонние QUIC-сервисы вроде Hysteria).
 - **Фильтр:** по hostlist (SNI), домены youtube **обязательно включая API**
   `youtubei.googleapis.com` + `googleapis.com` (иначе iOS-приложение не открывается).
 - **Запуск:** из `/config/zapret2` через sysv-init; автозапуск — `/config/scripts/post-config.d/`.
@@ -97,16 +98,26 @@ googleapis.com
 ```
 > ⚠️ `youtubei.googleapis.com` и `googleapis.com` — **критичны для iOS-приложения** (см. §7).
 
-### 4.3 QUIC → ICMP reject
-QUIC/UDP-443 заблокирован DPI и не обходится. «Тихий» drop нельзя (iOS-cronet виснет, не
-откатываясь на TCP). Отбиваем ICMP-ом:
+### 4.3 QUIC (UDP/443) — по умолчанию НЕ трогаем
+QUIC к YouTube/Google **режет сам DPI провайдера**, поэтому клиенты и так откатываются на наш
+рабочий TLS. **Никаких правил для QUIC ставить не нужно** — так работают все устройства (проверено),
+и не ломаются сторонние QUIC-сервисы (Hysteria и т.п.).
+
+> Раньше здесь стоял глобальный `REJECT udp/443 icmp-port-unreachable` — он ускорял откат на TCP,
+> но **рубил Hysteria** (она тоже на QUIC). Убрали — всё продолжило работать.
+
+**Опциональный «ускоритель» — только если какой-то упрямый клиент зависает на QUIC** (например
+iOS-приложение долго не откатывается): точечный REJECT **только к IP Google** (Hysteria не заденет),
+через ipset из официальных диапазонов:
 ```sh
-iptables -I FORWARD 1 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
+ipset create youtube_quic hash:net family inet -exist
+curl -s https://www.gstatic.com/ipranges/goog.json | grep ipv4Prefix \
+  | grep -oE '[0-9.]+/[0-9]+' | while read n; do ipset add youtube_quic "$n" -exist; done
+iptables -I FORWARD 1 -p udp --dport 443 -m set --match-set youtube_quic dst \
+  -j REJECT --reject-with icmp-port-unreachable
 ```
-Это правило не ведёт zapret — вешаем его персистентно (§6).
-- Сейчас стоит **глобальный** REJECT (весь HTTP/3 на LAN падает на TCP — для сайтов незаметно).
-- Опционально точнее: тот же REJECT с `-m set --match-set <google> dst` по ipset из диапазонов
-  Google (`https://www.gstatic.com/ipranges/goog.json`), чтобы чужой QUIC не трогать.
+`ipset` должен существовать ДО правила; IP Google меняются → обновлять на буте. **Глобальный
+REJECT `udp/443` не ставить** — сломает Hysteria/другой QUIC.
 
 ---
 
@@ -133,15 +144,15 @@ iptables -t mangle -nvL | grep -i NFQUEUE   # правила qnum 300, счёт�
 # zapret2 YouTube bypass — autostart on EdgeOS
 sleep 10                               # дать EdgeOS поднять firewall/интерфейсы
 /config/zapret2/init.d/sysv/zapret2 restart
-# QUIC -> ICMP reject (форсим откат на TCP)
-iptables -C FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null \
-  || iptables -I FORWARD 1 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
+# QUIC НЕ трогаем (DPI режет сам, клиенты откатываются на TCP).
+# Если понадобится "ускоритель" для упрямого клиента — точечный REJECT по ipset Google (см. §4.3),
+# ТОЛЬКО не глобальный udp/443 (сломает Hysteria).
 ```
 ```sh
 chmod +x /config/scripts/post-config.d/zapret2.sh
 ```
-После `reboot` проверить: `pgrep -a nfqws2`, наличие NFQUEUE-правил и REJECT, и YouTube на
-устройствах. (Проверено: после перезагрузки всё поднимается само.)
+После `reboot` проверить: `pgrep -a nfqws2`, наличие NFQUEUE-правил (qnum 300), и YouTube на
+устройствах. (Проверено: после перезагрузки всё поднимается само, без правил для QUIC.)
 
 > Если будете менять firewall EdgeOS через `configure/commit` — он может перестроить iptables;
 > тогда перезапустить `post-config.d/zapret2.sh` или `./init.d/sysv/zapret2 restart`.
@@ -204,7 +215,8 @@ NFQWS2_OPT="
 ### QUIC
 Рабочей стратегии обхода QUIC **не найдено** — даже с готовым «белым» google-блобом
 (`files/fake/quic_initial_www_google_com.bin`, `--lua-desync=fake:blob=quic_google:repeats=...`).
-UDP/443 режется целиком → решение только одно: **ICMP-reject** (§4.3), клиенты уходят на TLS.
+YouTube-QUIC режется самим DPI → решение: увести YouTube на TCP (клиенты сами откатываются,
+см. §4.3). Почему QUIC в принципе не пробивается десинком — см. §9.
 
 ---
 
@@ -232,8 +244,23 @@ UDP/443 режется целиком → решение только одно: 
   который **блокируется DPI** и пробивается только `tcpseg` (не `wssize+multidisorder`). Поэтому
   Safari «работал», а приложение не открывалось. Вывод: `youtubei.googleapis.com`/`googleapis.com`
   должны быть в hostlist, а стратегия — `tcpseg`.
-- **QUIC и iOS-cronet.** Нельзя «тихо» дропать QUIC — iOS не откатывается на TCP. Только ICMP
-  reject. Android и Safari откатываются сами, iOS — нет.
+- **Почему QUIC не обходится, а Hysteria по QUIC работает.** Это разные задачи, их легко спутать:
+  - DPI блокирует не «QUIC вообще», а QUIC **к YouTube/Google** — по адресу назначения (сети
+    Google) и по SNI, который **читается прямо из QUIC Initial** (он AEAD-шифрован ключами из
+    Connection ID по общеизвестной initial-salt, т.е. DPI расшифровывает его так же, как сервер).
+  - **Hysteria** гонит QUIC к **вашему VPS** (нейтральный IP, не в блоклисте) с обфускацией — DPI
+    не за что зацепиться. Её работа доказывает: UDP/443/QUIC у провайдера открыт, режется только
+    QUIC к Google.
+  - **Десинк (как для TCP) на QUIC не работает:** Initial — одна UDP-датаграмма (нет потоковой
+    пересборки, которую можно «рассинхронить»), а её содержимое зашифровано и целостно —
+    фейки/сегментация её не расклеивают, а IP-фрагментация ломает хендшейк и для сервера. Поэтому
+    рабочего пакетного обхода YouTube-QUIC нет. «Белый» google-блоб — лишь обманка, DPI режет по
+    реальному Initial/по IP.
+  - **Вывод:** YouTube уводим на TCP (там десинк работает). Хотеть YouTube именно *по* QUIC — это
+    уже туннель (гнать его через ту же Hysteria как прокси), а не обход DPI.
+- **QUIC и iOS-cronet (нюанс отката).** Если бы мы сами дропали QUIC «тихо» — iOS-cronet мог не
+  откатиться на TCP. Но раз QUIC режет сам DPI, откат происходит и без наших правил. На всякий
+  случай (если клиент зависнет) — точечный ICMP-reject по ipset Google (§4.3), не глобальный.
 - **ECH.** ПК-Chrome к Google использует настоящий ECH (SNI зашифрован) → hostlist по SNI на ПК
   может не матчить. Нативные приложения (iOS/Android) шлют GREASE-ECH (SNI видим) → hostlist
   работает. Если понадобится «железобетонно» для ПК — фильтровать по IP-диапазонам Google
